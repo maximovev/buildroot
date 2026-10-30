@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2034,SC2329
+# SPDX-License-Identifier: GPL-2.0+
+# SPDX-FileCopyrightText: Alexander Shiyan <shc_work@mail.ru>
+
+declare -A CAN_DT_MAP=(
+	["diasom,ds-imx8m-som"]=""
+	["diasom,ds-rk3568-som"]=""
+	["diasom,ds-rk3568-som-evb"]="ds_rk3568_som_evb_test_can"
+	["diasom,ds-rk3568-som-smarc-evb"]="ds_rk3568_som_smarc_evb_test_can"
+	["diasom,ds-rk3588-btb"]=""
+	["diasom,ds-rk3588-btb-evb-hat"]="ds_rk3588_btb_evb_hat_test_can"
+)
+
+declare -a CAN_INTERFACES
+
+readonly CAN_BITRATE=500000
+
+check_dependencies_can() {
+	local deps=(candump cansend ifconfig ip)
+	check_dependencies "CAN" "${deps[@]}"
+}
+
+test_can_generate_msg() {
+	local test_id=$(( RANDOM % 1792 + 256 ))
+	printf -v test_id "%03X" $test_id
+
+	local data_length=$(( RANDOM % 8 + 1 ))
+	local test_data=""
+	local i byte hex_byte
+
+	for ((i=0; i<data_length; i++)); do
+		byte=$(( RANDOM % 256 ))
+		printf -v hex_byte "%02X" $byte
+		test_data="${test_data}${hex_byte}"
+	done
+
+	echo "$test_id#$test_data"
+}
+
+test_can() {
+	local iface="$1"
+
+	if [ ! -d "/sys/class/net/$iface" ]; then
+		echo "Missing"
+		return 1
+	fi
+
+	cleanup() {
+		if [ -n "$CAN_CONSOLE_LEVEL" ] && [ -w /proc/sys/kernel/printk ]; then
+			echo "$CAN_CONSOLE_LEVEL" > /proc/sys/kernel/printk 2>/dev/null
+		fi
+	}
+	trap cleanup EXIT RETURN INT TERM HUP
+
+	if [ -r /proc/sys/kernel/printk ]; then
+		CAN_CONSOLE_LEVEL=$(awk '{print $1}' /proc/sys/kernel/printk 2>/dev/null)
+		echo 1 > /proc/sys/kernel/printk 2>/dev/null
+	fi
+
+	ip link set "$iface" down &>/dev/null
+	ip link set "$iface" up type can bitrate $CAN_BITRATE &>/dev/null
+
+	sleep 0.5
+
+	local msg
+	msg=$(test_can_generate_msg)
+	cansend "$iface" "$msg"
+
+	sleep 0.5
+
+	local ifconfig_output
+	ifconfig_output=$(ifconfig "$iface" 2>/dev/null)
+
+	ip link set "$iface" down &>/dev/null
+
+	if echo "$ifconfig_output" | grep -q "UP" && echo "$ifconfig_output" | grep -q "RUNNING"; then
+		CAN_INTERFACES+=("$iface")
+		echo "OK"
+		return 0
+	fi
+
+	echo "BUS-OFF"
+
+	return 1
+}
+
+test_can_loop() {
+	local iface1="$1"
+	local iface2="$2"
+
+	cleanup() {
+		if [ -n "$CAN_CONSOLE_LEVEL" ] && [ -w /proc/sys/kernel/printk ]; then
+			echo "$CAN_CONSOLE_LEVEL" > /proc/sys/kernel/printk 2>/dev/null
+		fi
+	}
+	trap cleanup EXIT RETURN INT TERM HUP
+
+	if [ -r /proc/sys/kernel/printk ]; then
+		CAN_CONSOLE_LEVEL=$(awk '{print $1}' /proc/sys/kernel/printk 2>/dev/null)
+		echo 1 > /proc/sys/kernel/printk 2>/dev/null
+	fi
+
+	ip link set "$iface1" down &>/dev/null
+	ip link set "$iface2" down &>/dev/null
+
+	sleep 0.2
+
+	ip link set "$iface1" up type can bitrate $CAN_BITRATE &>/dev/null
+	ip link set "$iface2" up type can bitrate $CAN_BITRATE &>/dev/null
+
+	sleep 1
+
+	local msg
+	msg=$(test_can_generate_msg)
+
+	timeout 0.1 candump "$iface1" &>/dev/null
+	timeout 0.1 candump "$iface2" &>/dev/null
+
+	local attempt result
+	for attempt in {1..3}; do
+		result=$(cansend "$iface1" "$msg" 2>/dev/null & candump -L -n 1 -T 1000 "$iface2" 2>/dev/null | grep -F "$msg")
+
+		if [ -n "$result" ]; then
+			break
+		fi
+		sleep 0.5
+	done
+
+	ip link set "$iface1" down &>/dev/null
+	ip link set "$iface2" down &>/dev/null
+
+	if [ -n "$result" ]; then
+		echo "OK"
+		return 0
+	fi
+
+	echo "Error"
+
+	return 1
+}
+
+test_can_loop_can0_can1() {
+	test_can_loop can0 can1
+}
+
+test_can_can0() {
+	test_can can0
+}
+
+test_can_can1_with_loop() {
+	test_can can1
+	local ret=$?
+
+	if [[ " ${CAN_INTERFACES[*]} " =~ " can0 " ]] && [[ " ${CAN_INTERFACES[*]} " =~ " can1 " ]]; then
+		register_test "@test_can_loop_can0_can1" "CAN Loopback"
+	fi
+
+	return $ret
+}
+
+ds_rk3568_som_evb_test_can() {
+	register_test "test_can_can0" "CAN0 (CAN1)"
+	register_test "test_can_can1_with_loop" "CAN1 (CAN2)"
+}
+
+ds_rk3568_som_smarc_evb_test_can() {
+	register_test "test_can_can0" "CAN0 (CAN0)"
+	register_test "test_can_can1_with_loop" "CAN2 (CAN1)"
+}
+
+ds_rk3588_btb_evb_hat_test_can() {
+	register_test "test_can_can0" "CAN0 (CAN1)"
+	register_test "test_can_can1_with_loop" "CAN1 (CAN2)"
+}
+
+if ! declare -F check_dependencies &>/dev/null; then
+	echo "Script cannot be executed alone"
+
+	return 1
+fi
+
+if [ -f /proc/device-tree/compatible ]; then
+	check_dependencies_can || return 1
+
+	found_compatible=0
+	while IFS= read -r -d '' compatible; do
+		compat_str=$(echo -n "$compatible" | tr -d '\0')
+
+		for pattern in "${!CAN_DT_MAP[@]}"; do
+			if [[ $compat_str == "$pattern" ]]; then
+				[[ -n "${CAN_DT_MAP[$pattern]}" ]] && ${CAN_DT_MAP[$pattern]}
+				found_compatible=1
+			fi
+		done
+	done < /proc/device-tree/compatible
+
+	if [ $found_compatible -eq 0 ]; then
+		echo "Error: Cannot find suitable devicetree compatible string"
+		return 1
+	fi
+fi
+
+return 0

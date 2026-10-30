@@ -1,0 +1,306 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0+
+# SPDX-FileCopyrightText: Alexander Shiyan <shc_work@mail.ru>
+
+declare -A I2C_DT_MAP=(
+	["diasom,ds-imx8m-som"]="ds_imx8m_som_test_i2c"
+	["diasom,ds-imx8m-som-evb"]="ds_imx8m_som_evb_test_i2c"
+	["diasom,ds-rk3568-som"]="ds_rk3568_som_test_i2c"
+	["diasom,ds-rk3568-som-evb"]="ds_rk3568_som_evb_test_i2c"
+	["diasom,ds-rk3568-som-smarc"]="ds_rk3568_som_smarc_test_i2c"
+	["diasom,ds-rk3568-som-sodimm"]="ds_rk3568_som_sodimm_test_i2c"
+	["diasom,ds-rk3588-btb"]="ds_rk3588_btb_test_i2c"
+	["diasom,ds-rk3588-btb-evb"]="ds_rk3588_btb_evb_test_i2c"
+	["diasom,ds-rk3588-btb-evb-hat"]="ds_rk3588_btb_evb_hat_test_i2c"
+)
+
+check_dependencies_i2c() {
+	local deps=("${I2C_DEPS[@]}" "${VER_DEPS[@]}")
+	deps+=(@i2c_device_test)
+	deps+=(@ver_get_ds_rk3568_som_version @ver_get_ds_rk3568_som_evb_version)
+	deps+=(@ver_get_ds_rk3568_som_smarc_version)
+	check_dependencies "I2C" "${deps[@]}"
+}
+
+check_dependencies_i2c_default() {
+	local deps=()
+	check_dependencies "I2C" "${deps[@]}"
+}
+
+generate_i2c_device_test() {
+	local bus=$1
+	local addr=$2
+	local desc=$3
+	local level=$4
+
+	local func_name="test_i2c${bus}_${addr}"
+	eval "${func_name}() { i2c_device_test ${bus} ${addr}; }"
+	register_test "@${func_name}" "I2C${bus} Device ${addr} (${desc})" "${level}"
+}
+
+generate_i2c_bus_test() {
+	local bus=$1
+	local desc=$2
+	local level=$3
+	local devices=${4:-""}
+
+	local func_name="test_i2c${bus}"
+	eval "${func_name}() {
+		local bus_path=\"/sys/bus/i2c/devices/i2c-${bus}\"
+		if [ ! -d \"\$bus_path\" ]; then
+			echo \"Missing\"
+			return 1
+		fi
+
+		if [ -n \"${devices}\" ]; then
+			IFS=',' read -ra dev_list <<< \"${devices}\"
+			for device in \"\${dev_list[@]}\"; do
+				IFS=':' read -r addr dev_desc <<< \"\$device\"
+				generate_i2c_device_test \"${bus}\" \"\$addr\" \"\$dev_desc\" \"$((level + 1))\"
+			done
+		fi
+
+		echo \"OK\"
+
+		return 0
+	}"
+
+	register_test "@${func_name}" "${desc}" "${level}"
+}
+
+ds_imx8m_som_test_i2c() {
+	generate_i2c_bus_test 0 "I2C1 Bus (SOM)" 0 "0x4b:PMIC"
+}
+
+ds_imx8m_som_evb_test_i2c() {
+	generate_i2c_bus_test 1 "I2C2 Bus" 0
+}
+
+ds_rk3568_som_evb_test_i2c4_0x70() {
+	i2c_device_test 4 0x70
+	local ret=$?
+
+	if [ $ret -eq 0 ]; then
+		generate_i2c_bus_test 7 "I2C7 Bus" 2
+		generate_i2c_bus_test 6 "I2C6 Bus" 2
+	fi
+
+	return $ret
+}
+
+ds_rk3568_som_evb_test_i2c4() {
+	if [ -e /dev/i2c-4 ]; then
+		ver_get_ds_rk3568_som_evb_version &>/dev/null
+		if [[ "$EVB_VERSION" -ge 0x130 ]]; then
+			register_test "@ds_rk3568_som_evb_test_i2c4_0x70" "I2C4 Device 0x70 (PCA9546)" 1
+		fi
+		if [[ "$EVB_VERSION" -ge 0x121 && "$EVB_VERSION" -lt 0x130 ]]; then
+			generate_i2c_device_test 4 0x51 "EEPROM" 1
+			generate_i2c_device_test 4 0x50 "EEPROM" 1
+		fi
+
+		generate_i2c_device_test 4 0x10 "ES8388" 1
+
+		echo "OK"
+
+		return 0
+	fi
+
+	echo "Missing"
+
+	return 1
+}
+
+ds_rk3568_som_smarc_test_i2c2_0x70() {
+	i2c_device_test 2 0x70
+	local ret=$?
+
+	if [ $ret -eq 0 ]; then
+		ver_get_ds_rk3568_som_smarc_version &>/dev/null
+		if [[ "$MOD_VERSION" -ge 0x300 ]]; then
+			generate_i2c_bus_test 9 "I2C9 Bus (SMARC Internal)" 2 "0x68:RTC,0x51:EEPROM,0x50:EEPROM"
+		fi
+
+		generate_i2c_bus_test 8 "I2C8 Bus (I2C_LCD)" 2
+		generate_i2c_bus_test 7 "I2C7 Bus (I2C_CAM1)" 2
+		generate_i2c_bus_test 6 "I2C6 Bus (I2C_CAM0)" 2
+	fi
+
+	return $ret
+}
+
+ds_rk3568_som_sodimm_test_i2c4_0x70() {
+	i2c_device_test 4 0x70
+	local ret=$?
+
+	if [ $ret -eq 0 ]; then
+		generate_i2c_bus_test 9 "I2C9 Bus (SODIMM Internal)" 2 "0x68:M41T62"
+		generate_i2c_bus_test 8 "I2C8 Bus (SODIMM I2C2)" 2
+		generate_i2c_bus_test 7 "I2C7 Bus (SODIMM I2C1)" 2
+		generate_i2c_bus_test 6 "I2C6 Bus (SODIMM I2C0)" 2
+	fi
+
+	return $ret
+}
+
+ds_rk3588_btb_evb_test_i2c3_0x70() {
+	i2c_device_test 3 0x70
+	local ret=$?
+
+	if [ $ret -eq 0 ]; then
+		generate_i2c_bus_test 11 "I2C11 Bus (TYPEC0)" 2 "0x22:FUSB302"
+		generate_i2c_bus_test 10 "I2C10 Bus (CAM1)" 2
+		generate_i2c_bus_test 9 "I2C9 Bus (CAM0)" 2
+	fi
+
+	return $ret
+}
+
+ds_rk3568_som_smarc_test_i2c2() {
+	if [ -e /dev/i2c-2 ]; then
+		register_test "@ds_rk3568_som_smarc_test_i2c2_0x70" "I2C2 Device 0x70 (I2C MUX)" 1
+		generate_i2c_device_test 2 0x23 "I2C GPIO" 1
+
+		echo "OK"
+
+		return 0
+	fi
+
+	echo "Missing"
+
+	return 1
+}
+
+ds_rk3568_som_sodimm_test_i2c4() {
+	if [ -e /dev/i2c-4 ]; then
+		register_test "@ds_rk3568_som_sodimm_test_i2c4_0x70" "I2C4 Device 0x70 (I2C MUX)" 1
+		generate_i2c_device_test 4 0x51 "EEPROM" 1
+		generate_i2c_device_test 4 0x50 "EEPROM" 1
+
+		echo "OK"
+
+		return 0
+	fi
+
+	echo "Missing"
+
+	return 1
+}
+
+ds_rk3568_som_test_i2c() {
+	local devs="0x20:PMIC"
+
+	ver_get_ds_rk3568_som_version &>/dev/null
+	if [[ "$SOM_VERSION" -ge 0x200 ]]; then
+		devs+=",0x1c:TCS4525"
+	fi
+
+	generate_i2c_bus_test 0 "I2C0 Bus (SOM)" 0 "$devs"
+}
+
+ds_rk3568_som_evb_test_i2c() {
+	register_test "@ds_rk3568_som_evb_test_i2c4" "I2C4 Bus"
+	generate_i2c_bus_test 1 "I2C1 Bus" 0 "0x22:FUSB302"
+}
+
+ds_rk3568_som_smarc_test_i2c() {
+	local devs=""
+
+	ver_get_ds_rk3568_som_smarc_version &>/dev/null
+	if [[ "$MOD_VERSION" -eq 0x111 ]]; then
+		devs+="0x68:RTC,0x51:EEPROM,0x50:EEPROM"
+	fi
+
+	generate_i2c_bus_test 4 "I2C4 Bus (I2C_PM)" 0
+	generate_i2c_bus_test 3 "I2C3 Bus (I2C_GP)" 0 "$devs"
+	register_test "@ds_rk3568_som_smarc_test_i2c2" "I2C2 Bus (SMARC Internal)"
+}
+
+ds_rk3568_som_sodimm_test_i2c() {
+	register_test "ds_rk3568_som_sodimm_test_i2c4" "I2C4 Bus (SODIMM Internal)"
+	generate_i2c_bus_test 1 "I2C1 Bus (I2C_CAM)" 0
+}
+
+ds_rk3588_btb_test_i2c() {
+	generate_i2c_bus_test 6 "I2C6 Bus (BTB)" 0 "0x68:M41T62,0x51:RK628D,0x50:EEPROM"
+	generate_i2c_bus_test 2 "I2C2 Bus (BTB)" 0 "0x42:RK8602"
+	generate_i2c_bus_test 0 "I2C0 Bus (BTB)" 0 "0x43:RK8603,0x42:RK8602"
+}
+
+ds_rk3588_btb_evb_test_i2c3() {
+	if [ -e /dev/i2c-3 ]; then
+		register_test "@ds_rk3588_btb_evb_test_i2c3_0x70" "I2C3 Device 0x70 (TCA9546)" 1
+
+		echo "OK"
+
+		return 0
+	fi
+
+	echo "Missing"
+
+	return 1
+}
+
+ds_rk3588_btb_evb_test_i2c() {
+	generate_i2c_bus_test 7 "I2C7 Bus" 0 "0x52:EEPROM,0x51:EEPROM,0x50:EEPROM,0x22:PCAL6524"
+	register_test "@ds_rk3588_btb_evb_test_i2c3" "I2C3 Bus"
+}
+
+ds_rk3588_btb_evb_hat_test_i2c() {
+	generate_i2c_bus_test 4 "I2C4 Bus (HAT)" 0 "0x20:PCF8574"
+	generate_i2c_bus_test 1 "I2C1 Bus (HAT)" 0 "0x20:PCF8574,0x08:ES8156"
+}
+
+test_i2c_default() {
+	local i2c_buses=()
+	local bus
+
+	while IFS= read -r -d '' bus; do
+		local bus_name
+		bus_name=$(basename "$bus")
+		if [[ "$bus_name" =~ ^i2c-[0-9]+$ ]]; then
+			local bus_num=${bus_name#i2c-}
+			i2c_buses+=("$bus_num")
+		fi
+	done < <(find /sys/bus/i2c/devices -name "i2c-*" -type l -print0 2>/dev/null)
+
+	local sorted_buses
+	IFS=$'\n' read -r -d '' -a sorted_buses < <(printf '%s\n' "${i2c_buses[@]}" | sort -nr && printf '\0')
+	unset IFS
+
+	for bus_num in "${sorted_buses[@]}"; do
+		generate_i2c_bus_test "$bus_num" "I2C${bus_num} Bus" 0
+	 done
+}
+
+if ! declare -F check_dependencies &>/dev/null; then
+	echo "Script cannot be executed alone"
+
+	return 1
+fi
+
+if [ -f /proc/device-tree/compatible ]; then
+	check_dependencies_i2c || return 1
+
+	found_compatible=0
+	while IFS= read -r -d '' compatible; do
+		compat_str=$(echo -n "$compatible" | tr -d '\0')
+
+		for pattern in "${!I2C_DT_MAP[@]}"; do
+			if [[ $compat_str == "$pattern" ]]; then
+				[[ -n "${I2C_DT_MAP[$pattern]}" ]] && ${I2C_DT_MAP[$pattern]}
+				found_compatible=1
+			fi
+		done
+	done < /proc/device-tree/compatible
+
+	if [ $found_compatible -eq 0 ]; then
+		echo "Error: Cannot find suitable devicetree compatible string"
+		return 1
+	fi
+else
+	check_dependencies_i2c_default || return 1
+	test_i2c_default
+fi
+
+return 0

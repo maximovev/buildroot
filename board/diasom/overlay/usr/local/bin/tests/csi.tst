@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2329
+# SPDX-License-Identifier: GPL-2.0+
+# SPDX-FileCopyrightText: Alexander Shiyan <shc_work@mail.ru>
+
+declare -A CSI_DT_MAP=(
+	["diasom,ds-imx8m-som"]=""
+	["diasom,ds-imx8m-som-evb"]="ds_imx8m_som_evb_test_csi"
+	["diasom,ds-rk3568-som"]=""
+	["diasom,ds-rk3568-som-evb"]="ds_rk3568_som_evb_test_csi"
+	["diasom,ds-rk3568-som-smarc-evb"]="ds_rk3568_som_smarc_evb_test_csi"
+	["diasom,ds-rk3568-som-sodimm-evb"]="ds_rk3568_som_sodimm_evb_test_csi"
+	["diasom,ds-rk3588-btb"]=""
+	["diasom,ds-rk3588-btb-evb"]="ds_rk3588_btb_evb_test_csi"
+)
+
+check_dependencies_csi() {
+	local deps=(media-ctl v4l2-ctl)
+	check_dependencies "CSI" "${deps[@]}"
+}
+
+find_csi_video_device() {
+	local csi_name="$1"
+	local media_dev
+
+	for media_dev in /dev/media*; do
+		[ -c "$media_dev" ] || continue
+
+		local output
+		output=$(media-ctl -d "$media_dev" -p 2>/dev/null)
+		if echo "$output" | grep -q "entity .*: $csi_name"; then
+			local video
+			video=$(echo "$output" | awk -v csi="$csi_name" '
+				$0 ~ "entity .*: " csi " \\(" { found=1 }
+				found && /device node name/ { print $NF; exit }
+			')
+			if [ -n "$video" ] && [ -c "$video" ]; then
+				echo "$video"
+				return 0
+			fi
+		fi
+	done
+
+	return 1
+}
+
+find_video_by_driver_pattern() {
+	local pattern="$1"
+	local devices_output
+
+	devices_output=$(v4l2-ctl --list-devices 2>/dev/null)
+	[ -z "$devices_output" ] && return 1
+
+	local found=0
+	local video_dev=""
+	while IFS= read -r line; do
+		if [[ "$line" =~ ^.*: && "$line" == *"$pattern"* ]]; then
+			found=1
+			continue
+		fi
+
+		 if [ $found -eq 1 ] && [[ "$line" =~ ^[[:space:]]+ ]]; then
+			if [[ "$line" =~ /dev/video[0-9]+ ]]; then
+				video_dev=$(echo "$line" | grep -o '/dev/video[0-9]*' | head -1)
+				echo "$video_dev"
+				return 0
+			fi
+		else
+			[ $found -eq 1 ] && found=0
+		fi
+	done <<< "$devices_output"
+
+	return 1
+}
+
+test_video() {
+	local video_name="$1"
+
+	cleanup() {
+		if [ -n "$CSI_CONSOLE_LEVEL" ] && [ -w /proc/sys/kernel/printk ]; then
+			echo "$CSI_CONSOLE_LEVEL" > /proc/sys/kernel/printk 2>/dev/null
+		fi
+	}
+	trap cleanup EXIT RETURN INT TERM HUP
+
+	if [ -r /proc/sys/kernel/printk ]; then
+		CSI_CONSOLE_LEVEL=$(awk '{print $1}' /proc/sys/kernel/printk 2>/dev/null)
+		echo 1 > /proc/sys/kernel/printk 2>/dev/null
+	fi
+
+	local video_dev
+	video_dev=$(find_csi_video_device "$video_name")
+	if [ -z "$video_dev" ] || [ ! -c "$video_dev" ]; then
+		video_dev=$(find_video_by_driver_pattern "$video_name")
+	fi
+	if [ -z "$video_dev" ] || [ ! -c "$video_dev" ]; then
+		echo "Camera not found (Unsupported?)"
+		return 1
+	fi
+
+	local output
+	# The format can be set as: --set-fmt-video=width=1920,height=1080,pixelformat=UYVY
+	output=$(timeout 4s v4l2-ctl -d "$video_dev" --stream-mmap=3 --stream-count=400 --stream-to=/dev/null 2>&1)
+
+	local fps_values
+	fps_values=$(echo "$output" | grep -o '[0-9]\+\.[0-9]\+ fps' | awk '{print $1}' | tr '\n' ' ')
+
+	if [ -z "$fps_values" ]; then
+		echo "No signal"
+		return 1
+	fi
+
+	local avg_fps
+	avg_fps=$(echo "$fps_values" | awk '
+		BEGIN { sum=0; count=0 }
+		{
+			for(i=1;i<=NF;i++){sum+=$i; count++}
+		}
+		END { print sum/count }
+	')
+	avg_fps=$(printf "%.1f" "$avg_fps")
+
+	echo "${avg_fps} fps"
+
+	if (( $(echo "$avg_fps < 5.0" | bc -l) )); then
+		return 2
+	fi
+
+	return 0
+}
+
+test_freescale_csi() {
+	# Camera I2C interface is turned OFF
+	# The test can be runned in clear boot only (test_camera.sh)
+	echo "Skipped"
+
+	return 2
+}
+
+test_isp_csi0() {
+	test_video "rkisp_mainpath"
+}
+
+test_cif_csi2() {
+	test_video "rkcif-mipi2-id0"
+}
+
+test_cif_csi4() {
+	test_video "rkcif-mipi4-id0"
+}
+
+test_hdmirx() {
+	test_video "snps_hdmirx"
+}
+
+ds_imx8m_som_evb_test_csi() {
+	register_test "test_freescale_csi" "CSI"
+}
+
+ds_rk3568_som_evb_test_csi() {
+	register_test "test_isp_csi0" "CSI0 (CAM1)"
+}
+
+ds_rk3568_som_smarc_evb_test_csi() {
+	register_test "test_isp_csi0" "CSI (CSI1)"
+}
+
+ds_rk3568_som_sodimm_evb_test_csi() {
+	register_test "test_isp_csi0" "CSI (CSI0)"
+}
+
+ds_rk3588_btb_evb_test_csi() {
+	register_test "test_cif_csi2" "CSI2 (CSI0)"
+	register_test "test_cif_csi4" "CSI4 (CSI1)"
+	register_test "test_hdmirx" "HDMIRX"
+}
+
+if ! declare -F check_dependencies &>/dev/null; then
+	echo "Script cannot be executed alone"
+
+	return 1
+fi
+
+if [ -f /proc/device-tree/compatible ]; then
+	check_dependencies_csi || return 1
+
+	found_compatible=0
+	while IFS= read -r -d '' compatible; do
+		compat_str=$(echo -n "$compatible" | tr -d '\0')
+
+		for pattern in "${!CSI_DT_MAP[@]}"; do
+			if [[ $compat_str == "$pattern" ]]; then
+				[[ -n "${CSI_DT_MAP[$pattern]}" ]] && ${CSI_DT_MAP[$pattern]}
+				found_compatible=1
+			fi
+		done
+	done < /proc/device-tree/compatible
+
+	if [ $found_compatible -eq 0 ]; then
+		echo "Error: Cannot find suitable devicetree compatible string"
+		return 1
+	fi
+fi
+
+return 0

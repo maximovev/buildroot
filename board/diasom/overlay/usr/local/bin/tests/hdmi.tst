@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0+
+# SPDX-FileCopyrightText: Alexander Shiyan <shc_work@mail.ru>
+
+declare -A HDMI_DT_MAP=(
+	["diasom,ds-imx8m-som"]=""
+	["diasom,ds-imx8m-som-evb"]="test_hdmi0"
+	["diasom,ds-rk3568-som"]=""
+	["diasom,ds-rk3568-som-evb"]="test_hdmi0_dsi1"
+	["diasom,ds-rk3568-som-smarc-evb"]="test_hdmi0"
+	["diasom,ds-rk3568-som-sodimm-evb"]="test_hdmi0"
+	["diasom,ds-rk3588-btb"]=""
+	["diasom,ds-rk3588-btb-evb"]="test_hdmi0_hdmi1"
+)
+
+check_dependencies_hdmi() {
+	local deps=(modetest)
+	check_dependencies "HDMI" "${deps[@]}"
+}
+
+test_hdmi_card() {
+	local interface="$1"
+
+	if ! modetest -c | grep -q "$interface"; then
+		echo "Missing"
+		return 1
+	fi
+
+	shopt -s nullglob
+	local paths=(/sys/class/drm/card?-"$interface")
+	shopt -u nullglob
+
+	for path in "${paths[@]}"; do
+		if [ -d "$path" ]; then
+			local status_file="$path/status"
+			if [ -f "$status_file" ]; then
+				local status
+				status=$(cat "$status_file")
+				if [ "$status" = "connected" ]; then
+					echo "OK"
+					return 0
+				fi
+			fi
+		fi
+	done
+
+	echo "Disconnected"
+
+	return 2
+}
+
+test_hdmi_dsi1() {
+	test_hdmi_card "DSI-1"
+}
+
+test_hdmi_hdmi0() {
+	test_hdmi_card "HDMI-A-1"
+}
+
+test_hdmi_hdmi1() {
+	test_hdmi_card "HDMI-A-2"
+}
+
+test_hdmi0() {
+	register_test "test_hdmi_hdmi0" "HDMI0"
+}
+
+test_hdmi1() {
+	register_test "test_hdmi_hdmi1" "HDMI1"
+}
+
+test_hdmi0_dsi1() {
+	test_hdmi0
+	register_test "test_hdmi_dsi1" "DSI1"
+}
+
+test_hdmi0_hdmi1() {
+	test_hdmi0
+	test_hdmi1
+}
+
+if ! declare -F check_dependencies &>/dev/null; then
+	echo "Script cannot be executed alone"
+
+	return 1
+fi
+
+if [ -f /proc/device-tree/compatible ]; then
+	check_dependencies_hdmi || return 1
+
+	found_compatible=0
+	while IFS= read -r -d '' compatible; do
+		compat_str=$(echo -n "$compatible" | tr -d '\0')
+
+		for pattern in "${!HDMI_DT_MAP[@]}"; do
+			if [[ $compat_str == "$pattern" ]]; then
+				[[ -n "${HDMI_DT_MAP[$pattern]}" ]] && ${HDMI_DT_MAP[$pattern]}
+				found_compatible=1
+			fi
+		done
+	done < /proc/device-tree/compatible
+
+	if [ $found_compatible -eq 0 ]; then
+		echo "Error: Cannot find suitable devicetree compatible string"
+		return 1
+	fi
+fi
+
+return 0
